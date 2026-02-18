@@ -40,15 +40,19 @@ I2S_DATA_OUT_PIN = 22 // Speaker Data Output (not used)
 
 ## LED Status Indicators
 
+LED behavior depends on the configurable LED Mode (Off / Static / Level):
+
 | Color | Meaning |
 |-------|---------|
 | Yellow | System starting up |
-| Green | Ready — RTSP server running, waiting for connection |
-| Bright Green | Streaming — good audio level (30-70%) |
-| Dim Green | Streaming — low audio level |
-| Orange | Streaming — hot signal (>70%) |
-| Dim Purple | Streaming — very quiet (<5%) |
+| Blue | Ready — RTSP server running, waiting for connection |
+| Green | Streaming — static mode (default) |
+| Bright Green | Streaming — good audio level (30-70%) — level mode |
+| Dim Green | Streaming — low audio level — level mode |
+| Orange | Streaming — hot signal (>70%) — level mode |
+| Dim Purple | Streaming — very quiet (<5%) — level mode |
 | Red | Streaming — clipping! (or thermal protection activated) |
+| Off | LED disabled via Web UI |
 
 ## Features
 

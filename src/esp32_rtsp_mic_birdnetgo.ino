@@ -83,6 +83,9 @@ bool audioClippedLastBlock = false; // clipping occurred in last processed block
 uint16_t peakHoldAbs16 = 0;       // peak hold (recent window)
 unsigned long peakHoldUntilMs = 0; // when to clear hold
 
+// -- LED mode: 0=off, 1=static, 2=level
+uint8_t ledMode = 1;  // Default: static purple during streaming
+
 // -- Automatic Gain Control (AGC)
 bool agcEnabled = false;
 volatile float agcMultiplier = 1.0f;   // Current AGC multiplier (read by WebUI)
@@ -440,6 +443,8 @@ void loadAudioSettings() {
     highpassEnabled = audioPrefs.getBool("hpEnable", DEFAULT_HPF_ENABLED);
     highpassCutoffHz = (uint16_t)audioPrefs.getUInt("hpCutoff", DEFAULT_HPF_CUTOFF_HZ);
     agcEnabled = audioPrefs.getBool("agcEnable", false);
+    ledMode = audioPrefs.getUChar("ledMode", 1);
+    if (ledMode > 2) ledMode = 1;
     overheatProtectionEnabled = audioPrefs.getBool("ohEnable", DEFAULT_OVERHEAT_PROTECTION);
     uint32_t ohLimit = audioPrefs.getUInt("ohThresh", DEFAULT_OVERHEAT_LIMIT_C);
     if (ohLimit < OVERHEAT_MIN_LIMIT_C) ohLimit = OVERHEAT_MIN_LIMIT_C;
@@ -487,6 +492,7 @@ void saveAudioSettings() {
     audioPrefs.putBool("hpEnable", highpassEnabled);
     audioPrefs.putUInt("hpCutoff", (uint32_t)highpassCutoffHz);
     audioPrefs.putBool("agcEnable", agcEnabled);
+    audioPrefs.putUChar("ledMode", ledMode);
     audioPrefs.putBool("ohEnable", overheatProtectionEnabled);
     uint32_t ohLimit = (uint32_t)(overheatShutdownC + 0.5f);
     if (ohLimit < OVERHEAT_MIN_LIMIT_C) ohLimit = OVERHEAT_MIN_LIMIT_C;
@@ -543,6 +549,7 @@ void resetToDefaultSettings() {
     highpassCutoffHz = DEFAULT_HPF_CUTOFF_HZ;
     agcEnabled = false;
     agcMultiplier = 1.0f;
+    ledMode = 1;
     overheatProtectionEnabled = DEFAULT_OVERHEAT_PROTECTION;
     overheatShutdownC = (float)DEFAULT_OVERHEAT_LIMIT_C;
     overheatLockoutActive = false;
@@ -752,19 +759,28 @@ void audioCaptureTask(void* parameter) {
             peakHoldAbs16 = 0;
         }
 
-        // LED audio level indicator (throttled to ~10 Hz)
+        // LED update (throttled to ~10 Hz)
         if (millis() - lastLedUpdate > 100) {
-            float pct = peakAbs / 32767.0f;
-            if (clipped) {
-                M5.dis.drawpix(0, CRGB(255, 0, 0));        // Red: clipping
-            } else if (pct > 0.7f) {
-                M5.dis.drawpix(0, CRGB(255, 165, 0));      // Orange: hot signal
-            } else if (pct > 0.3f) {
-                M5.dis.drawpix(0, CRGB(0, 255, 0));        // Green: good level
-            } else if (pct > 0.05f) {
-                M5.dis.drawpix(0, CRGB(0, 64, 0));         // Dim green: low signal
+            if (ledMode == 2) {
+                // Level mode: color-coded audio level
+                float pct = peakAbs / 32767.0f;
+                if (clipped) {
+                    M5.dis.drawpix(0, CRGB(255, 0, 0));        // Red: clipping
+                } else if (pct > 0.7f) {
+                    M5.dis.drawpix(0, CRGB(255, 165, 0));      // Orange: hot signal
+                } else if (pct > 0.3f) {
+                    M5.dis.drawpix(0, CRGB(0, 255, 0));        // Bright green: good level
+                } else if (pct > 0.05f) {
+                    M5.dis.drawpix(0, CRGB(0, 64, 0));         // Dim green: low signal
+                } else {
+                    M5.dis.drawpix(0, CRGB(32, 0, 32));        // Dim purple: very quiet
+                }
+            } else if (ledMode == 1) {
+                // Static mode: solid green during streaming
+                M5.dis.drawpix(0, CRGB(0, 128, 0));
             } else {
-                M5.dis.drawpix(0, CRGB(64, 0, 64));        // Dim purple: very quiet
+                // Off mode: LED dark during streaming
+                M5.dis.drawpix(0, CRGB(0, 0, 0));
             }
             lastLedUpdate = millis();
         }
@@ -1001,7 +1017,9 @@ void handleRTSPCommand(WiFiClient &client, String request) {
         // Start audio capture task
         startAudioCaptureTask();
 
-        M5.dis.drawpix(0, CRGB(128, 0, 128));
+        if (ledMode == 1) M5.dis.drawpix(0, CRGB(0, 128, 0));  // Green: streaming
+        else if (ledMode == 0) M5.dis.drawpix(0, CRGB(0, 0, 0));
+        // ledMode==2 handled by Core 1 audio level indicator
         simplePrintln("STREAMING STARTED");
 
     } else if (request.startsWith("TEARDOWN")) {
@@ -1013,7 +1031,8 @@ void handleRTSPCommand(WiFiClient &client, String request) {
         isStreaming = false;
         streamClient = NULL;
 
-        M5.dis.drawpix(0, CRGB(0, 128, 0));
+        if (ledMode > 0) M5.dis.drawpix(0, CRGB(0, 0, 128));
+        else M5.dis.drawpix(0, CRGB(0, 0, 0));
         simplePrintln("STREAMING STOPPED");
     } else if (request.startsWith("GET_PARAMETER")) {
         // Many RTSP clients send GET_PARAMETER as keep-alive.
@@ -1182,8 +1201,9 @@ void setup() {
         simplePrintln("RTSP server ready on port 8554");
         simplePrintln("RTSP URL: rtsp://" + WiFi.localIP().toString() + ":8554/audio");
         simplePrintln("RTSP URL: rtsp://atomecho.local:8554/audio");
-        // Set LED to green when ready
-        M5.dis.drawpix(0, CRGB(0, 128, 0));
+        // Set LED to blue when ready (green reserved for level indicator)
+        if (ledMode > 0) M5.dis.drawpix(0, CRGB(0, 0, 128));
+        else M5.dis.drawpix(0, CRGB(0, 0, 0));
     } else {
         simplePrintln("RTSP server paused due to thermal latch. Clear via Web UI before resuming streaming.");
         // Set LED to red when latched
@@ -1239,7 +1259,8 @@ void loop() {
             // Core 1 detected write failure — task stays alive for fast reconnect
             isStreaming = false;
             rtspClient.stop();
-            M5.dis.drawpix(0, CRGB(0, 128, 0));
+            if (ledMode > 0) M5.dis.drawpix(0, CRGB(0, 0, 128));
+            else M5.dis.drawpix(0, CRGB(0, 0, 0));
             simplePrintln("RTSP client disconnected");
         }
 
@@ -1276,7 +1297,8 @@ void loop() {
         if (overheatLatched) {
             M5.dis.drawpix(0, CRGB(128, 0, 0));
         } else {
-            M5.dis.drawpix(0, CRGB(0, 128, 0));
+            if (ledMode > 0) M5.dis.drawpix(0, CRGB(0, 0, 128));
+            else M5.dis.drawpix(0, CRGB(0, 0, 0));
         }
     }
     // Handle deferred reboot/reset safely here
