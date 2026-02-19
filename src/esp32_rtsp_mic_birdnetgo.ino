@@ -910,7 +910,7 @@ void setup_i2s_driver() {
 static bool writeAll(WiFiClient &client, const uint8_t* data, size_t len) {
     size_t off = 0;
     unsigned long startTime = millis();
-    const unsigned long WRITE_TIMEOUT_MS = 150;  // 150ms timeout - allows WiFi to recover from brief stalls
+    const unsigned long WRITE_TIMEOUT_MS = 50;  // 50ms timeout - balance between responsiveness and stability
 
     while (off < len) {
         // Check timeout to prevent blocking Core 1
@@ -1083,9 +1083,7 @@ void handleRTSPCommand(WiFiClient &client, String request) {
     }
 }
 
-// RTSP processing (runs on Core 0)
-// Called both during negotiation (!isStreaming) and during streaming
-// to handle keepalives (GET_PARAMETER) and clean teardowns
+// RTSP processing (runs on Core 0, only called when !isStreaming)
 void processRTSP(WiFiClient &client) {
     if (!client.connected()) return;
 
@@ -1326,11 +1324,6 @@ void loop() {
             unsigned long sessionSec = (millis() - lastRtspPlayMs) / 1000;
             simplePrintln("RTSP client disconnected (session: " + String(sessionSec) + "s, dropped: " +
                          String(audioPacketsDropped) + ", RSSI: " + String(WiFi.RSSI()) + " dBm)");
-        }
-
-        // Phase: handle RTSP commands during streaming (keepalives, teardown)
-        if (isStreaming && rtspClient && rtspClient.connected()) {
-            processRTSP(rtspClient);
         }
 
         // Phase: accept new client (only when not streaming)
