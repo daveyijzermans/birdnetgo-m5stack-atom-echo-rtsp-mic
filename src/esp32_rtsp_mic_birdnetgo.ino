@@ -942,7 +942,7 @@ static bool writeAll(WiFiClient &client, const uint8_t* data, size_t len) {
 }
 
 static uint32_t consecutiveWriteFailures = 0;
-static const uint32_t MAX_WRITE_FAILURES = 30;  // Allow ~2s of failures before disconnect
+static const uint32_t MAX_WRITE_FAILURES = 100;  // Allow ~5s of failures before disconnect
 
 void sendRTPPacket(WiFiClient &client, int16_t* audioData, int numSamples) {
     if (!client.connected()) {

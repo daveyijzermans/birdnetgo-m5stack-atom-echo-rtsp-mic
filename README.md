@@ -248,7 +248,7 @@ lib_deps =
 ### v2.2.0
 - Added **RTSP receive buffer drain** — drains stale keepalive data on disconnect, keeping the TCP window clean
 - Added **large RTSP session timeout** (86400s) — reduces ffmpeg keepalive frequency from every 30s to every ~12 hours
-- Added **write failure tolerance** — 30 consecutive failures (~2s) before disconnecting, survives brief WiFi hiccups
+- Added **write failure tolerance** — 100 consecutive failures (~5s) before disconnecting, survives brief WiFi hiccups
 - Fixed **auto-recovery restart loop** — requires 3 consecutive failures with 2-minute cooldown
 - Lowered auto-recovery threshold from 70% to 50% of expected packet rate
 - Added **NTP time sync** — real timestamps (EST) in all log messages
