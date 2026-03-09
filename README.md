@@ -2,7 +2,7 @@
 
 A high-quality RTSP audio streaming server for the **M5Stack Atom Echo**, streaming live audio to [BirdNET-Go](https://github.com/tphakala/birdnet-go) or any RTSP-compatible client.
 
-<p align="center">
+<p align="left">
   <img src="https://shop.m5stack.com/cdn/shop/files/3_e4ea519e-765f-4f30-aad1-7855ff9f8744_1200x1200.jpg" alt="M5Stack Atom Echo" width="300">
 </p>
 
