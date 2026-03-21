@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  tag:
+  tag-and-release:
     runs-on: ubuntu-latest
 
     steps:
@@ -34,13 +34,57 @@ jobs:
             echo "Tag v${{ steps.version.outputs.version }} already exists, skipping."
           else
             echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} is new, will create."
+            echo "Tag v${{ steps.version.outputs.version }} is new, will release."
           fi
 
-      - name: Create and push tag
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.exists == 'false'
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO
+        if: steps.check.outputs.exists == 'false'
+        run: pip install platformio
+
+      - name: Build firmware
+        if: steps.check.outputs.exists == 'false'
+        run: pio run
+
+      - name: Collect binaries
         if: steps.check.outputs.exists == 'false'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          mkdir -p release
+
+          cp .pio/build/m5stack-atom/firmware.bin   release/firmware.bin
+          cp .pio/build/m5stack-atom/bootloader.bin release/bootloader.bin
+          cp .pio/build/m5stack-atom/partitions.bin release/partitions.bin
+
+          BOOT_APP=$(find ~/.platformio/packages -name "boot_app0.bin" | head -1)
+          if [ -z "$BOOT_APP" ]; then
+            echo "ERROR: boot_app0.bin not found"
+            exit 1
+          fi
+          cp "$BOOT_APP" release/boot_app0.bin
+
+          echo "--- Binary sizes ---"
+          ls -lh release/
+
+      - name: Create tag and GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          files: release/*
+          generate_release_notes: true
