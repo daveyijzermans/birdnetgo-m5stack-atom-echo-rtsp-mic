@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'src/esp32_rtsp_mic_birdnetgo.ino'
+  workflow_dispatch:
 
 permissions:
   contents: write
