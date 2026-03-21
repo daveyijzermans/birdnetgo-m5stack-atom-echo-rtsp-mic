@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flash Atom Echo — RTSP Mic for BirdNET-Go</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1rem;
+    }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 2.5rem 2rem;
+      max-width: 520px;
+      width: 100%;
+      text-align: center;
+    }
+
+    .logo {
+      width: 72px;
+      height: 72px;
+      background: #1f6feb;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 1.5rem;
+      font-size: 2rem;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: #f0f6fc;
+    }
+
+    .subtitle {
+      color: #8b949e;
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+      line-height: 1.5;
+    }
+
+    .steps {
+      text-align: left;
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 2rem;
+      font-size: 0.85rem;
+      color: #8b949e;
+      line-height: 1.8;
+    }
+
+    .steps ol {
+      padding-left: 1.2rem;
+    }
+
+    .steps li {
+      margin-bottom: 0.25rem;
+    }
+
+    .steps code {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 0 4px;
+      font-size: 0.8rem;
+      color: #79c0ff;
+    }
+
+    .flash-btn {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 1.5rem;
+    }
+
+    esp-web-install-button::part(button) {
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.7rem 1.8rem;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    esp-web-install-button::part(button):hover {
+      background: #2ea043;
+    }
+
+    .browser-warning {
+      display: none;
+      background: #3d1f00;
+      border: 1px solid #d1931a;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.85rem;
+      color: #d1931a;
+    }
+
+    .info {
+      font-size: 0.8rem;
+      color: #484f58;
+      line-height: 1.6;
+    }
+
+    .info a {
+      color: #58a6ff;
+      text-decoration: none;
+    }
+
+    .info a:hover {
+      text-decoration: underline;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid #21262d;
+      margin: 1.5rem 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🐦</div>
+    <h1>Atom Echo — RTSP Mic for BirdNET-Go</h1>
+    <p class="subtitle">
+      Flash your M5Stack Atom Echo directly from Chrome.<br>
+      No drivers or tools required.
+    </p>
+
+    <div class="browser-warning" id="browserWarning">
+      ⚠️ WebSerial is only supported in <strong>Chrome</strong> or <strong>Edge</strong> on desktop.
+      Please open this page in Chrome to flash your device.
+    </div>
+
+    <div class="steps">
+      <ol>
+        <li>Connect your Atom Echo via USB</li>
+        <li>Click <strong>Install</strong> and select the serial port</li>
+        <li>Wait for flashing to complete (~30 seconds)</li>
+        <li>Connect to <code>ESP32-RTSP-Mic-AP</code> to configure WiFi</li>
+        <li>Stream at <code>rtsp://atomecho.local:8554/audio</code></li>
+      </ol>
+    </div>
+
+    <div class="flash-btn">
+      <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+    </div>
+
+    <hr class="divider">
+
+    <p class="info">
+      Flashes the latest release from
+      <a href="https://github.com/stedrow/birdnetgo-m5stack-atom-echo-rtsp-mic/releases/latest" target="_blank">GitHub Releases</a>.
+      &nbsp;·&nbsp;
+      <a href="https://github.com/stedrow/birdnetgo-m5stack-atom-echo-rtsp-mic" target="_blank">Source on GitHub</a>
+    </p>
+  </div>
+
+  <script>
+    // Show warning if WebSerial is not available (non-Chrome browser)
+    if (!navigator.serial) {
+      document.getElementById('browserWarning').style.display = 'block';
+    }
+  </script>
+</body>
+</html>
