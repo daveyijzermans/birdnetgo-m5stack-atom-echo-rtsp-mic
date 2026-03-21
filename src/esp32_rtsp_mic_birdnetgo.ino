@@ -25,18 +25,23 @@ SemaphoreHandle_t taskExitSemaphore = NULL;  // confirmed task exit
 volatile bool core1OwnsLED = false;          // LED ownership flag
 
 // ================== SETTINGS (ESP32 RTSP Mic for BirdNET-Go) ==================
-#define FW_VERSION "2.3.0"
+#define FW_VERSION "2.4.0"
 // Expose FW version as a global C string for WebUI/API
 const char* FW_VERSION_STR = FW_VERSION;
 
 // -- DEFAULT PARAMETERS (configurable via Web UI / API)
-#define DEFAULT_SAMPLE_RATE 16000  // M5Stack Atom Echo: 16kHz for PDM microphone
+#define DEFAULT_SAMPLE_RATE 48000  // M5Stack Atom Echo: 48kHz — BirdNET-Go native rate
+                                   // SPM1423 PDM clock = 48000 × 64 = 3.072 MHz (spec: 1.0–3.25 MHz)
+                                   // Hard max 48 kHz: 96 kHz pushes PDM clock to 6.144 MHz (2× over spec)
 #define DEFAULT_GAIN_FACTOR 3.0f
-#define DEFAULT_BUFFER_SIZE 1024   // 64ms @ 16kHz - good balance for BirdNET-Go
+#define DEFAULT_BUFFER_SIZE 3072   // 64ms @ 48kHz - good balance for BirdNET-Go
 #define DEFAULT_WIFI_TX_DBM 19.5f  // Default WiFi TX power in dBm
-// High-pass filter defaults (to remove low-frequency rumble)
+// High-pass filter defaults
+// Default 80 Hz removes only DC and infrasound. BirdNET-Go's low-frequency spectrogram
+// covers 0–3 kHz (trained on unfiltered audio) — 300 Hz removes signal for owls,
+// bitterns, and other low-calling species. Raise only for strong wind/traffic noise.
 #define DEFAULT_HPF_ENABLED true
-#define DEFAULT_HPF_CUTOFF_HZ 300
+#define DEFAULT_HPF_CUTOFF_HZ 80
 
 // Thermal protection defaults
 #define DEFAULT_OVERHEAT_PROTECTION true
@@ -112,6 +117,20 @@ struct Biquad {
         return y;
     }
     inline void reset() { x1 = x2 = y1 = y2 = 0.0f; }
+};
+// DC blocker — removes SPM1423 PDM DC bias (~2–6% of full scale from sigma-delta idle pattern).
+// H(z) = (1 - z⁻¹) / (1 - R·z⁻¹). Pole R=0.9999 → −3 dB at ~0.25 Hz: transparent to all audio.
+// Fixed/non-configurable: 0.9999 is the mathematically correct value for this mic.
+// Always runs as the first processing stage, before the HPF.
+static const float DC_BLOCKER_R = 0.9999f;
+struct DcBlocker {
+    float x1{0.0f}, y1{0.0f};
+    inline float process(float x) {
+        float y = x - x1 + DC_BLOCKER_R * y1;
+        x1 = x; y1 = y;
+        return y;
+    }
+    inline void reset() { x1 = y1 = 0.0f; }
 };
 bool highpassEnabled = DEFAULT_HPF_ENABLED;
 uint16_t highpassCutoffHz = DEFAULT_HPF_CUTOFF_HZ;
@@ -668,7 +687,7 @@ void drainRtspReceiveBuffer(WiFiClient &client) {
 }
 
 // ================== CORE 1: FULL AUDIO PIPELINE ==================
-// I2S capture → process (HPF, gain, AGC) → RTP → WiFi
+// I2S capture → DC blocker → HPF → gain → AGC → RTP → WiFi
 // Uses streamClient pointer (set by Core 0 on PLAY, cleared here on failure)
 // IMPORTANT: No String allocation or simplePrintln on this core (heap contention)
 void audioCaptureTask(void* parameter) {
@@ -694,6 +713,7 @@ void audioCaptureTask(void* parameter) {
 
     // High-pass filter state (local to this core)
     Biquad localHpf = hpf;
+    DcBlocker localDcBlocker;  // DC blocker state (fixed pole, always active)
     uint32_t localHpfConfigSampleRate = hpfConfigSampleRate;
     uint16_t localHpfConfigCutoff = hpfConfigCutoff;
 
@@ -779,6 +799,9 @@ void audioCaptureTask(void* parameter) {
 
         for (int i = 0; i < samplesRead; i++) {
             float sample = (float)(captureBuffer[i] >> i2sShiftBits);
+
+            // Remove PDM DC bias before HPF (always active — see DC_BLOCKER_R comment)
+            sample = localDcBlocker.process(sample);
 
             if (highpassEnabled) {
                 sample = localHpf.process(sample);
@@ -997,8 +1020,10 @@ bool requestStreamStop(const char* reason) {
 void setup_i2s_driver() {
     i2s_driver_uninstall(I2S_NUM_0);
 
-    // DMA buffer configuration - smaller for lower latency with 16kHz
-    uint16_t dma_buf_len = 60;  // Match M5Atom Echo example
+    // Scale DMA buffer to ~3.75 ms per interrupt regardless of sample rate.
+    // Formula: round(rate × 0.00375), hardware max = 1024. Examples: 16k→60, 32k→120, 48k→180.
+    uint16_t dma_buf_len = (uint16_t)min(1024UL,
+        (unsigned long)((currentSampleRate * 375UL + 50000UL) / 100000UL));
 
     i2s_config_t i2s_config = {
         // PDM mode required for SPM1423 microphone on Atom Echo
