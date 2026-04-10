@@ -27,18 +27,23 @@ SemaphoreHandle_t taskExitSemaphore = NULL;  // confirmed task exit
 volatile bool core1OwnsLED = false;          // LED ownership flag
 
 // ================== SETTINGS (ESP32 RTSP Mic for BirdNET-Go) ==================
-#define FW_VERSION "2.3.0"
+#define FW_VERSION "2.4.0"
 // Expose FW version as a global C string for WebUI/API
 const char* FW_VERSION_STR = FW_VERSION;
 
 // -- DEFAULT PARAMETERS (configurable via Web UI / API)
-#define DEFAULT_SAMPLE_RATE 16000  // M5Stack Atom + Atomic Echo Base: 16kHz for ES8311 codec
+#define DEFAULT_SAMPLE_RATE 48000  // M5Stack Atom + Atomic Echo Base: 48kHz — BirdNET-Go native rate
+                                   // ES8311 ADC handles this cleanly; 16 kHz cuts off at 8 kHz Nyquist,
+                                   // losing the 8–15 kHz band BirdNET-Go uses for passerine classification.
 #define DEFAULT_GAIN_FACTOR 3.0f
-#define DEFAULT_BUFFER_SIZE 1024   // 64ms @ 16kHz - good balance for BirdNET-Go
+#define DEFAULT_BUFFER_SIZE 3072   // 64ms @ 48kHz - good balance for BirdNET-Go
 #define DEFAULT_WIFI_TX_DBM 19.5f  // Default WiFi TX power in dBm
-// High-pass filter defaults (to remove low-frequency rumble)
+// High-pass filter defaults
+// Default 80 Hz removes only DC and infrasound. BirdNET-Go's low-frequency spectrogram
+// covers 0–3 kHz (trained on unfiltered audio) — 300 Hz removes signal for owls,
+// bitterns, and other low-calling species. Raise only for strong wind/traffic noise.
 #define DEFAULT_HPF_ENABLED true
-#define DEFAULT_HPF_CUTOFF_HZ 300
+#define DEFAULT_HPF_CUTOFF_HZ 80
 
 // Thermal protection defaults
 #define DEFAULT_OVERHEAT_PROTECTION true
@@ -1012,8 +1017,10 @@ void setup_i2s_driver() {
 
     i2s_driver_uninstall(I2S_NUM_0);
 
-    // DMA buffer configuration
-    uint16_t dma_buf_len = 60;
+    // Scale DMA buffer to ~3.75 ms per interrupt regardless of sample rate.
+    // Formula: round(rate × 0.00375), hardware max = 1024. Examples: 16k→60, 32k→120, 48k→180.
+    uint16_t dma_buf_len = (uint16_t)min(1024UL,
+        (unsigned long)((currentSampleRate * 375UL + 50000UL) / 100000UL));
 
     i2s_config_t i2s_config = {
         // Standard I2S mode — ES8311 codec outputs signed 16-bit PCM (not PDM)
