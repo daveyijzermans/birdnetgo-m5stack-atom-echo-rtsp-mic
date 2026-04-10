@@ -38,6 +38,7 @@ const char* FW_VERSION_STR = FW_VERSION;
 #define DEFAULT_GAIN_FACTOR 3.0f
 #define DEFAULT_BUFFER_SIZE 3072   // 64ms @ 48kHz - good balance for BirdNET-Go
 #define DEFAULT_WIFI_TX_DBM 19.5f  // Default WiFi TX power in dBm
+#define DEFAULT_HOSTNAME "atomicecho"  // mDNS hostname (rtsp://<hostname>.local:8554/audio)
 // High-pass filter defaults
 // Default 80 Hz removes only DC and infrasound. BirdNET-Go's low-frequency spectrogram
 // covers 0–3 kHz (trained on unfiltered audio) — 300 Hz removes signal for owls,
@@ -93,6 +94,7 @@ uint16_t currentBufferSize = DEFAULT_BUFFER_SIZE;
 // The ES8311 codec on the Atomic Echo Base outputs standard signed 16-bit PCM
 // via I2S — no bit shifting is needed.
 uint8_t i2sShiftBits = 0;  // Fixed at 0 for ES8311 codec on Atomic Echo Base
+String currentHostname = DEFAULT_HOSTNAME;  // mDNS/WiFi hostname (persisted, UI-configurable)
 
 // -- Audio metering / clipping diagnostics
 uint16_t lastPeakAbs16 = 0;       // last block peak absolute value (0..32767)
@@ -215,6 +217,16 @@ static wifi_power_t pickWifiPowerLevel(float dbm) {
     if (dbm <= 18.5f) return WIFI_POWER_18_5dBm;
     if (dbm <= 19.0f) return WIFI_POWER_19dBm;
     return WIFI_POWER_19_5dBm;
+}
+
+// Apply mDNS hostname — call after WiFi connect, or when hostname changes
+void applyHostname() {
+    MDNS.end();
+    if (MDNS.begin(currentHostname.c_str())) {
+        MDNS.addService("rtsp", "tcp", 8554);
+        MDNS.addService("http", "tcp", 80);
+        simplePrintln("mDNS: " + currentHostname + ".local");
+    }
 }
 
 // Apply WiFi TX power
@@ -462,6 +474,7 @@ void loadAudioSettings() {
     currentBufferSize = audioPrefs.getUShort("bufferSize", DEFAULT_BUFFER_SIZE);
     // i2sShiftBits is ALWAYS 0 for ES8311 codec - not configurable
     i2sShiftBits = 0;
+    currentHostname = audioPrefs.getString("hostname", DEFAULT_HOSTNAME);
     autoRecoveryEnabled = audioPrefs.getBool("autoRecovery", false);
     scheduledResetEnabled = audioPrefs.getBool("schedReset", false);
     resetIntervalHours = audioPrefs.getUInt("resetHours", 24);
@@ -511,6 +524,7 @@ void saveAudioSettings() {
     audioPrefs.putFloat("gainFactor", currentGainFactor);
     audioPrefs.putUShort("bufferSize", currentBufferSize);
     audioPrefs.putUChar("shiftBits", i2sShiftBits);
+    audioPrefs.putString("hostname", currentHostname);
     audioPrefs.putBool("autoRecovery", autoRecoveryEnabled);
     audioPrefs.putBool("schedReset", scheduledResetEnabled);
     audioPrefs.putUInt("resetHours", resetIntervalHours);
@@ -566,6 +580,7 @@ void resetToDefaultSettings() {
     currentGainFactor = DEFAULT_GAIN_FACTOR;
     currentBufferSize = DEFAULT_BUFFER_SIZE;
     i2sShiftBits = 0;  // Fixed for ES8311 codec on Atomic Echo Base
+    currentHostname = DEFAULT_HOSTNAME;
 
     autoRecoveryEnabled = false;
     autoThresholdEnabled = true;
@@ -796,6 +811,17 @@ void audioCaptureTask(void* parameter) {
             }
 
             float amplified = sample * effectiveGain;
+            // Soft limiter: smoothly compress peaks above 79% FS to prevent hard clipping
+            // Uses tanh-based saturation: output approaches ±32767 asymptotically above threshold
+            static constexpr float SOFT_LIMIT = 26000.0f;
+            static constexpr float HARD_LIMIT = 32767.0f;
+            if (amplified > SOFT_LIMIT) {
+                float excess = (amplified - SOFT_LIMIT) / (HARD_LIMIT - SOFT_LIMIT);
+                amplified = SOFT_LIMIT + (HARD_LIMIT - SOFT_LIMIT) * tanhf(excess);
+            } else if (amplified < -SOFT_LIMIT) {
+                float excess = (-amplified - SOFT_LIMIT) / (HARD_LIMIT - SOFT_LIMIT);
+                amplified = -(SOFT_LIMIT + (HARD_LIMIT - SOFT_LIMIT) * tanhf(excess));
+            }
             float aabs = fabsf(amplified);
             if (aabs > peakAbs) peakAbs = aabs;
             if (aabs > 32767.0f) clipped = true;
@@ -1034,7 +1060,7 @@ void setup_i2s_driver() {
         .communication_format = I2S_COMM_FORMAT_I2S,
 #endif
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 6,
+        .dma_buf_count = 8,
         .dma_buf_len = dma_buf_len,
         .use_apll = false,
         .tx_desc_auto_clear = false,
@@ -1063,7 +1089,7 @@ void setup_i2s_driver() {
 static bool writeAll(WiFiClient &client, const uint8_t* data, size_t len) {
     size_t off = 0;
     unsigned long startTime = millis();
-    const unsigned long WRITE_TIMEOUT_MS = 50;  // 50ms timeout - balance between responsiveness and stability
+    const unsigned long WRITE_TIMEOUT_MS = 120;  // 120ms timeout — allows for brief TCP backpressure without dropping
 
     while (off < len) {
         // Check timeout to prevent blocking Core 1
@@ -1095,38 +1121,42 @@ void sendRTPPacket(WiFiClient &client, int16_t* audioData, int numSamples) {
     const uint16_t payloadSize = (uint16_t)(numSamples * (int)sizeof(int16_t));
     const uint16_t packetSize = (uint16_t)(12 + payloadSize);
 
-    // RTSP interleaved header: '$' 0x24, channel 0, length
-    uint8_t inter[4];
-    inter[0] = 0x24;
-    inter[1] = 0x00;
-    inter[2] = (uint8_t)((packetSize >> 8) & 0xFF);
-    inter[3] = (uint8_t)(packetSize & 0xFF);
+    // Build a single contiguous packet: interleaved header (4) + RTP header (12) + payload
+    // Stack-allocate for small buffers; max currentBufferSize is 8192 samples = 16384 bytes + 16 = 16400
+    const size_t totalSize = 4 + 12 + payloadSize;
+    uint8_t* pkt = (uint8_t*)malloc(totalSize);
+    if (!pkt) return;
+
+    // RTSP interleaved header
+    pkt[0] = 0x24;
+    pkt[1] = 0x00;
+    pkt[2] = (uint8_t)((packetSize >> 8) & 0xFF);
+    pkt[3] = (uint8_t)(packetSize & 0xFF);
 
     // RTP header (12 bytes)
-    uint8_t header[12];
-    header[0] = 0x80;      // V=2, P=0, X=0, CC=0
-    header[1] = 96;        // M=0, PT=96 (dynamic)
-    header[2] = (uint8_t)((rtpSequence >> 8) & 0xFF);
-    header[3] = (uint8_t)(rtpSequence & 0xFF);
-    header[4] = (uint8_t)((rtpTimestamp >> 24) & 0xFF);
-    header[5] = (uint8_t)((rtpTimestamp >> 16) & 0xFF);
-    header[6] = (uint8_t)((rtpTimestamp >> 8) & 0xFF);
-    header[7] = (uint8_t)(rtpTimestamp & 0xFF);
-    header[8]  = (uint8_t)((rtpSSRC >> 24) & 0xFF);
-    header[9]  = (uint8_t)((rtpSSRC >> 16) & 0xFF);
-    header[10] = (uint8_t)((rtpSSRC >> 8) & 0xFF);
-    header[11] = (uint8_t)(rtpSSRC & 0xFF);
+    pkt[4]  = 0x80;      // V=2, P=0, X=0, CC=0
+    pkt[5]  = 96;        // M=0, PT=96 (dynamic)
+    pkt[6]  = (uint8_t)((rtpSequence >> 8) & 0xFF);
+    pkt[7]  = (uint8_t)(rtpSequence & 0xFF);
+    pkt[8]  = (uint8_t)((rtpTimestamp >> 24) & 0xFF);
+    pkt[9]  = (uint8_t)((rtpTimestamp >> 16) & 0xFF);
+    pkt[10] = (uint8_t)((rtpTimestamp >> 8) & 0xFF);
+    pkt[11] = (uint8_t)(rtpTimestamp & 0xFF);
+    pkt[12] = (uint8_t)((rtpSSRC >> 24) & 0xFF);
+    pkt[13] = (uint8_t)((rtpSSRC >> 16) & 0xFF);
+    pkt[14] = (uint8_t)((rtpSSRC >> 8) & 0xFF);
+    pkt[15] = (uint8_t)(rtpSSRC & 0xFF);
 
-    // Host->network: per-sample byte-swap (16bit PCM L16 big-endian)
+    // Host->network: per-sample byte-swap (16-bit PCM L16 big-endian)
+    uint8_t* payload = pkt + 16;
     for (int i = 0; i < numSamples; ++i) {
         uint16_t s = (uint16_t)audioData[i];
-        s = (uint16_t)((s << 8) | (s >> 8));
-        audioData[i] = (int16_t)s;
+        payload[i*2]   = (uint8_t)(s >> 8);
+        payload[i*2+1] = (uint8_t)(s & 0xFF);
     }
 
-    bool success = writeAll(client, inter, sizeof(inter)) &&
-                   writeAll(client, header, sizeof(header)) &&
-                   writeAll(client, (uint8_t*)audioData, payloadSize);
+    bool success = writeAll(client, pkt, totalSize);
+    free(pkt);
 
     if (success) {
         rtpSequence++;
@@ -1181,6 +1211,8 @@ void handleRTSPCommand(WiFiClient &client, String request) {
         sdp += "m=audio 0 RTP/AVP 96\r\n";
         sdp += "a=rtpmap:96 L16/" + String(currentSampleRate) + "/1\r\n";
         sdp += "a=control:track1\r\n";
+        sdp += "a=control:*\r\n";
+        sdp += "a=range:npt=0-\r\n";
 
         client.print("RTSP/1.0 200 OK\r\n");
         client.print("CSeq: " + cseq + "\r\n");
@@ -1190,22 +1222,30 @@ void handleRTSPCommand(WiFiClient &client, String request) {
         client.print(sdp);
 
     } else if (request.startsWith("SETUP")) {
-        rtspSessionId = String(random(100000000, 999999999));
-        client.print("RTSP/1.0 200 OK\r\n");
-        client.print("CSeq: " + cseq + "\r\n");
-        // Large timeout reduces ffmpeg keepalive frequency (keepalive sent at timeout/2)
-        client.print("Session: " + rtspSessionId + ";timeout=86400\r\n");
-        client.print("Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
+        // Only TCP interleaved transport is supported — reject UDP requests
+        if (request.indexOf("RTP/AVP/TCP") < 0) {
+            client.print("RTSP/1.0 461 Unsupported Transport\r\n");
+            client.print("CSeq: " + cseq + "\r\n\r\n");
+        } else {
+            rtspSessionId = String(random(100000000, 999999999));
+            client.print("RTSP/1.0 200 OK\r\n");
+            client.print("CSeq: " + cseq + "\r\n");
+            // Large timeout reduces ffmpeg keepalive frequency (keepalive sent at timeout/2)
+            client.print("Session: " + rtspSessionId + ";timeout=86400\r\n");
+            client.print("Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
+        }
 
     } else if (request.startsWith("PLAY")) {
         // Send PLAY response FIRST (still on Core 0, Core 1 not started yet)
+        rtpSequence = 0;
+        rtpTimestamp = 0;
+
+        String ip = WiFi.localIP().toString();
         client.print("RTSP/1.0 200 OK\r\n");
         client.print("CSeq: " + cseq + "\r\n");
         client.print("Session: " + rtspSessionId + "\r\n");
-        client.print("Range: npt=0.000-\r\n\r\n");
-
-        rtpSequence = 0;
-        rtpTimestamp = 0;
+        client.print("Range: npt=0.000-\r\n");
+        client.print("RTP-Info: url=rtsp://" + ip + ":8554/audio/track1;seq=0;rtptime=0\r\n\r\n");
         audioPacketsSent = 0;
         audioPacketsDropped = 0;
         lastStatsReset = millis();
@@ -1339,6 +1379,7 @@ void setup() {
     // WiFi optimization for stable streaming
     Serial.println("Initializing WiFi...");
     WiFi.setSleep(false);
+    WiFi.setHostname(currentHostname.c_str());
 
     WiFiManager wm;
     wm.setConnectTimeout(60);
@@ -1371,12 +1412,7 @@ void setup() {
     // Apply configured WiFi TX power after connect (logs once on change)
     applyWifiTxPower(true);
 
-    // mDNS: allows rtsp://atomecho.local:8554/audio
-    if (MDNS.begin("atomecho")) {
-        MDNS.addService("rtsp", "tcp", 8554);
-        MDNS.addService("http", "tcp", 80);
-        simplePrintln("mDNS: atomecho.local");
-    }
+    applyHostname();
 
     Serial.println("Setting up I2S driver...");
     setup_i2s_driver();
@@ -1431,7 +1467,7 @@ void setup() {
     if (!overheatLatched) {
         simplePrintln("RTSP server ready on port 8554");
         simplePrintln("RTSP URL: rtsp://" + WiFi.localIP().toString() + ":8554/audio");
-        simplePrintln("RTSP URL: rtsp://atomecho.local:8554/audio");
+        simplePrintln("RTSP URL: rtsp://" + currentHostname + ".local:8554/audio");
         // Set LED to blue when ready (green reserved for level indicator)
         if (ledMode > 0) M5.dis.drawpix(0, CRGB(0, 0, 128));
         else M5.dis.drawpix(0, CRGB(0, 0, 0));
