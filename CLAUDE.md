@@ -11,10 +11,16 @@ See `README.md` for project documentation, features, architecture, and usage.
 ## Critical Rules
 
 ### i2sShiftBits MUST be 0
-- PDM microphones output 16-bit samples directly, no bit shifting needed
+- The ES8311 codec on the Atomic Echo Base outputs standard signed 16-bit PCM, no bit shifting needed
 - This is hardcoded to 0 in the firmware — do not make it configurable
 - If it gets set to any other value, all audio becomes zeros (e.g., `180 >> 11 = 0`)
-- Web UI shows it as read-only: "0 bits (fixed for PDM)"
+- Web UI shows it as read-only: "0 bits (fixed for ES8311)"
+
+### ES8311 Codec Init Must Precede Every I2S Driver Install
+- `setup_i2s_driver()` calls `echoBase.init()` first (configures ES8311 via I2C **and** installs a temporary I2S driver)
+- It then immediately calls `i2s_driver_uninstall()` and reinstalls the driver with our custom DMA/buffer settings
+- This sequence must be preserved: the ES8311 expects the I2S clock/format it was configured for, so always call `echoBase.init()` with the same `currentSampleRate` before reinstalling the driver
+- Hardware: M5Stack Atom + Atomic Echo Base (A149); pins: I2C SDA=25, SCL=21; I2S BCLK=33, LRCLK=19, DIN=23
 
 ### Socket Ownership Model
 - Core 1 exclusively owns the WiFiClient socket during streaming
