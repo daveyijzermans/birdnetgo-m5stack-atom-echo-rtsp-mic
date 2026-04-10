@@ -4,13 +4,15 @@
 #include "driver/i2s.h"
 #include <Preferences.h>
 #include <math.h>
+#include <Wire.h>
 #include <M5Atom.h>
+#include "M5EchoBase.h"
 #include "WebUI.h"
 
 // ================== DUAL-CORE AUDIO ARCHITECTURE ==================
 // Core 1: Complete audio pipeline (I2S → process → RTP → WiFi)
 // Core 0: Web UI, diagnostics, RTSP protocol, client management
-// PDM microphone outputs 16-bit samples directly
+// ES8311 codec outputs signed 16-bit PCM via standard I2S
 
 // Pointer handoff: Core 0 sets on PLAY, Core 1 uses for streaming, clears on failure
 WiFiClient* volatile streamClient = NULL;
@@ -30,7 +32,7 @@ volatile bool core1OwnsLED = false;          // LED ownership flag
 const char* FW_VERSION_STR = FW_VERSION;
 
 // -- DEFAULT PARAMETERS (configurable via Web UI / API)
-#define DEFAULT_SAMPLE_RATE 16000  // M5Stack Atom Echo: 16kHz for PDM microphone
+#define DEFAULT_SAMPLE_RATE 16000  // M5Stack Atom + Atomic Echo Base: 16kHz for ES8311 codec
 #define DEFAULT_GAIN_FACTOR 3.0f
 #define DEFAULT_BUFFER_SIZE 1024   // 64ms @ 16kHz - good balance for BirdNET-Go
 #define DEFAULT_WIFI_TX_DBM 19.5f  // Default WiFi TX power in dBm
@@ -45,11 +47,16 @@ const char* FW_VERSION_STR = FW_VERSION;
 #define OVERHEAT_MAX_LIMIT_C 95
 #define OVERHEAT_LIMIT_STEP_C 5
 
-// -- Pins (M5Stack Atom Echo with SPM1423 PDM Microphone)
-#define I2S_BCLK_PIN    19  // Bit Clock
-#define I2S_LRCLK_PIN   33  // Word Select / Left-Right Clock
-#define I2S_DATA_IN_PIN 23  // Microphone Data In
-#define I2S_DATA_OUT_PIN 22 // Speaker Data Out (not used for mic-only)
+// -- Pins (M5Stack Atom + Atomic Echo Base with ES8311 codec)
+#define I2C_SDA_PIN      25  // I2C SDA for ES8311 codec
+#define I2C_SCL_PIN      21  // I2C SCL for ES8311 codec
+#define I2S_BCLK_PIN     33  // Bit Clock
+#define I2S_LRCLK_PIN    19  // Word Select / Left-Right Clock
+#define I2S_DATA_IN_PIN  23  // Microphone Data In
+#define I2S_DATA_OUT_PIN 22  // Speaker Data Out (not used for mic-only)
+
+// Global ES8311 codec driver instance (M5Atomic Echo Base)
+M5EchoBase echoBase;
 
 // -- Servers
 WiFiServer rtspServer(8554);
@@ -78,10 +85,9 @@ bool rtspServerEnabled = true;
 uint32_t currentSampleRate = DEFAULT_SAMPLE_RATE;
 float currentGainFactor = DEFAULT_GAIN_FACTOR;
 uint16_t currentBufferSize = DEFAULT_BUFFER_SIZE;
-// PDM microphones (like SPM1423 on Atom Echo) output decimated samples
-// The hardware PDM decimation produces samples already close to correct range
-// Typical range: 0-3 for PDM vs 11-13 for I2S microphones
-uint8_t i2sShiftBits = 0;  // Default for PDM microphone on M5Stack Atom Echo
+// The ES8311 codec on the Atomic Echo Base outputs standard signed 16-bit PCM
+// via I2S — no bit shifting is needed.
+uint8_t i2sShiftBits = 0;  // Fixed at 0 for ES8311 codec on Atomic Echo Base
 
 // -- Audio metering / clipping diagnostics
 uint16_t lastPeakAbs16 = 0;       // last block peak absolute value (0..32767)
@@ -449,7 +455,7 @@ void loadAudioSettings() {
     currentSampleRate = audioPrefs.getUInt("sampleRate", DEFAULT_SAMPLE_RATE);
     currentGainFactor = audioPrefs.getFloat("gainFactor", DEFAULT_GAIN_FACTOR);
     currentBufferSize = audioPrefs.getUShort("bufferSize", DEFAULT_BUFFER_SIZE);
-    // i2sShiftBits is ALWAYS 0 for PDM microphones - not configurable
+    // i2sShiftBits is ALWAYS 0 for ES8311 codec - not configurable
     i2sShiftBits = 0;
     autoRecoveryEnabled = audioPrefs.getBool("autoRecovery", false);
     scheduledResetEnabled = audioPrefs.getBool("schedReset", false);
@@ -554,7 +560,7 @@ void resetToDefaultSettings() {
     currentSampleRate = DEFAULT_SAMPLE_RATE;
     currentGainFactor = DEFAULT_GAIN_FACTOR;
     currentBufferSize = DEFAULT_BUFFER_SIZE;
-    i2sShiftBits = 0;  // Default for PDM microphone on M5Stack Atom Echo
+    i2sShiftBits = 0;  // Fixed for ES8311 codec on Atomic Echo Base
 
     autoRecoveryEnabled = false;
     autoThresholdEnabled = true;
@@ -993,26 +999,35 @@ bool requestStreamStop(const char* reason) {
     }
 }
 
-// I2S setup for M5Stack Atom Echo (PDM microphone mode)
+// I2S and ES8311 codec setup for M5Stack Atom + Atomic Echo Base
 void setup_i2s_driver() {
+    // Initialize the ES8311 codec via I2C using the M5EchoBase library.
+    // This also installs a temporary I2S driver internally; we uninstall it
+    // immediately after so we can replace it with our own custom configuration.
+    echoBase.init(currentSampleRate,
+                  I2C_SDA_PIN, I2C_SCL_PIN,
+                  I2S_DATA_IN_PIN, I2S_LRCLK_PIN,
+                  I2S_DATA_OUT_PIN, I2S_BCLK_PIN,
+                  Wire);
+
     i2s_driver_uninstall(I2S_NUM_0);
 
-    // DMA buffer configuration - smaller for lower latency with 16kHz
-    uint16_t dma_buf_len = 60;  // Match M5Atom Echo example
+    // DMA buffer configuration
+    uint16_t dma_buf_len = 60;
 
     i2s_config_t i2s_config = {
-        // PDM mode required for SPM1423 microphone on Atom Echo
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+        // Standard I2S mode — ES8311 codec outputs signed 16-bit PCM (not PDM)
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = currentSampleRate,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,  // Match original demo exactly
-        .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT,    // ALL_RIGHT like original demo
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT,
 #if ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(4, 1, 0)
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
 #else
         .communication_format = I2S_COMM_FORMAT_I2S,
 #endif
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 6,     // Match M5Atom Echo example
+        .dma_buf_count = 6,
         .dma_buf_len = dma_buf_len,
         .use_apll = false,
         .tx_desc_auto_clear = false,
@@ -1033,7 +1048,7 @@ void setup_i2s_driver() {
     i2s_set_pin(I2S_NUM_0, &pin_config);
     i2s_set_clk(I2S_NUM_0, currentSampleRate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
 
-    simplePrintln("I2S ready (PDM mode): " + String(currentSampleRate) + "Hz, gain " +
+    simplePrintln("I2S ready (ES8311 codec): " + String(currentSampleRate) + "Hz, gain " +
                   String(currentGainFactor, 1) + ", buffer " + String(currentBufferSize) +
                   ", shiftBits " + String(i2sShiftBits));
 }
@@ -1282,7 +1297,7 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n\n=== ESP32 RTSP Mic Starting ===");
-    Serial.println("Board: M5Stack Atom Echo");
+    Serial.println("Board: M5Stack Atom + Atomic Echo Base");
 
     // Create task exit semaphore for confirmed Core 1 task shutdown
     taskExitSemaphore = xSemaphoreCreateBinary();
