@@ -8,6 +8,7 @@
 #include <M5Atom.h>
 #include "M5EchoBase.h"
 #include "WebUI.h"
+#include "arduinoFFT.h"
 
 // ================== DUAL-CORE AUDIO ARCHITECTURE ==================
 // Core 1: Complete audio pipeline (I2S → process → RTP → WiFi)
@@ -21,6 +22,15 @@ volatile bool audioTaskRunning = false;
 
 // Cross-core synchronization primitives
 portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;  // spinlock for log ring buffer
+
+// ================== FFT / SPECTRUM ==================
+#define FFT_SIZE 512
+#define FFT_BINS (FFT_SIZE / 2)
+static float fftVReal[FFT_SIZE];
+static float fftVImag[FFT_SIZE];
+uint8_t    fftMagnitudes[FFT_BINS];          // 0=silence 255=full-scale, shared with WebUI
+portMUX_TYPE fftMux = portMUX_INITIALIZER_UNLOCKED;
+volatile bool fftDataReady = false;
 volatile bool stopStreamRequested = false;   // Core 0 asks Core 1 to stop
 volatile bool streamCleanupDone = false;     // Core 1 confirms cleanup complete
 SemaphoreHandle_t taskExitSemaphore = NULL;  // confirmed task exit
@@ -869,6 +879,31 @@ void audioCaptureTask(void* parameter) {
             peakHoldUntilMs = millis() + 3000UL;
         } else if (peakHoldAbs16 > 0 && millis() > peakHoldUntilMs) {
             peakHoldAbs16 = 0;
+        }
+
+        // FFT: compute spectrum ~5 Hz for Web UI waterfall / dB meter
+        {
+            static unsigned long lastFftMs = 0;
+            if (samplesRead >= FFT_SIZE && millis() - lastFftMs >= 200) {
+                lastFftMs = millis();
+                for (int i = 0; i < FFT_SIZE; i++) {
+                    fftVReal[i] = (float)outputBuffer[i];
+                    fftVImag[i] = 0.0f;
+                }
+                ArduinoFFT<float> fft(fftVReal, fftVImag, FFT_SIZE, (float)currentSampleRate);
+                fft.windowing(FFTWindow::Hann, FFTDirection::Forward);
+                fft.compute(FFTDirection::Forward);
+                fft.complexToMagnitude();
+                portENTER_CRITICAL(&fftMux);
+                const float ref = FFT_SIZE * 0.5f * 32767.0f;
+                for (int i = 0; i < FFT_BINS; i++) {
+                    float db = 20.0f * log10f(fftVReal[i] / ref + 1e-10f);
+                    int v = (int)((db + 90.0f) * (255.0f / 90.0f));
+                    fftMagnitudes[i] = (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
+                }
+                fftDataReady = true;
+                portEXIT_CRITICAL(&fftMux);
+            }
         }
 
         // LED update (throttled to ~10 Hz)
