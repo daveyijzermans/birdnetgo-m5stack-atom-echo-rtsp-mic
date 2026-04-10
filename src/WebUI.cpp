@@ -215,9 +215,8 @@ static String htmlIndex() {
         "<span class='unit'>samples</span><button id='btn_buf_set' onclick=\"setv('buffer',sel_buf.value)\">Set</button></div></td></tr>"
         "<tr id='row_buf_hint' style='display:none'><td colspan='2'><div class='hint' id='txt_buf_hint'></div></td></tr>"
         "<tr><td class='k' id='t_latency'>Latency</td><td class='v' id='lat'></td></tr>"
-        "<tr><td class='k'><span id='t_level'>Signal Level</span><span class='help' id='h_level'>?</span></td><td class='v' id='level'></td></tr>"
+        "<tr><td class='k'><span id='t_level'>Signal Level</span><span class='help' id='h_level'>?</span></td><td class='v'><canvas id='dbm' width='300' height='18' style='width:100%;height:18px;border-radius:2px;display:block'></canvas><div id='level' style='margin-top:3px;font-size:12px'></div></td></tr>"
         "<tr id='row_level_hint' style='display:none'><td colspan='2'><div class='hint' id='txt_level_hint'></div></td></tr>"
-        "<tr><td colspan='2' style='padding:2px 0'><canvas id='dbm' width='300' height='18' style='width:100%;height:18px;border-radius:2px;display:block'></canvas></td></tr>"
         "<tr><td class='k' id='t_profile'>Profile</td><td class='v' id='profile'></td></tr>"
         "</table></div>"
 
