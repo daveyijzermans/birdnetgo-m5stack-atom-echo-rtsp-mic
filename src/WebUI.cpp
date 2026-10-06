@@ -138,10 +138,11 @@ static void apiSendJSON(const String &json) {
 }
 
 // HTML UI
-static String htmlIndex() {
+// The page streams straight from flash; built as one String it needs ~50 KB of heap per request,
+// liveness probes included.
+static void sendIndexPage() {
     String ip = WiFi.localIP().toString();
-    String h;
-    h += F(
+    web.sendContent_P(
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>M5Stack Atom Echo - RTSP Microphone</title>"
@@ -168,11 +169,11 @@ static String htmlIndex() {
         "<div id='ovr' class='overlay'><div class='box' id='ovr_msg'>Restarting…</div></div>"
         "<div class='page'>"
         "<div class='card'><div class='hero'><div><div class='brand'><div class='title' id='t_title'>M5Stack Atom Echo</div><span class='badge' id='fwv'></span></div><div class='subtitle'>URL: <a id='rtsp' class='mono' href='rtsp://");
-    h += ip;
-    h += F(
+    web.sendContent(ip);
+    web.sendContent_P(
         ":8554/audio' target='_blank'>rtsp://");
-    h += ip;
-    h += F(
+    web.sendContent(ip);
+    web.sendContent_P(
         ":8554/audio</a></div></div>"
         "<div class='lang'><a href='https://github.com/stedrow/birdnetgo-m5stack-atom-echo-rtsp-mic' target='_blank' class='gh'>GitHub</a>Lang: <select id='langSel'><option value='en'>English</option><option value='cs'>Čeština</option></select></div></div></div>"
         "<div class='row'>"
@@ -323,11 +324,19 @@ static String htmlIndex() {
 "H('h_led','row_led_hint'); H('h_rate','row_rate_hint'); H('h_gain','row_gain_hint'); H('h_hpf','row_hpf_hint'); H('h_hpf_cut','row_hpf_cut_hint'); H('h_agc','row_agc_hint'); H('h_buf','row_buf_hint'); H('h_auto','row_auto_hint'); H('h_thr','row_thr_hint'); H('h_thr_mode','row_thrmode_hint'); H('h_chk','row_chk_hint'); H('h_sched','row_sched_hint'); H('h_hours','row_hours_hint'); H('h_tx','row_tx_hint'); H('h_shift','row_shift_hint'); H('h_cpu','row_cpu_hint'); H('h_level','row_level_hint'); H('h_therm_protect','row_therm_hint_protect'); H('h_therm_limit','row_therm_hint_limit');"
         "initWaterfall(); loadAll();"
         "</script></body></html>");
-    return h;
+    web.sendContent("");  // ends the chunked response
 }
 
 // HTTP handlery
-static void httpIndex() { web.send(200, "text/html; charset=utf-8", htmlIndex()); }
+static void httpIndex() {
+    if (web.method() == HTTP_HEAD) {  // a liveness probe needs the status line only
+        web.send(200, "text/html; charset=utf-8", "");
+        return;
+    }
+    web.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    web.send(200, "text/html; charset=utf-8", "");
+    sendIndexPage();
+}
 
 static void httpStatus() {
     unsigned long uptimeSeconds = (millis() - bootTime) / 1000;
