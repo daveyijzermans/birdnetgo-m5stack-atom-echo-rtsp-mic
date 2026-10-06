@@ -22,10 +22,6 @@ See `README.md` for project documentation, features, architecture, and usage.
 - This sequence must be preserved: the ES8311 expects the I2S clock/format it was configured for, so always call `echoBase.init()` with the same `currentSampleRate` before reinstalling the driver
 - `echoBase.init()` configures the codec for 32-bit slots with its MCLK taken from BCLK (64 x fs), so the driver must run `I2S_BITS_PER_SAMPLE_32BIT`; 16-bit slots halve BCLK and the ADC then runs at half the sample rate, sending every sample twice
 - `echoBase.init()` also sets the mic preamp to its maximum and switches the speaker amplifier on; `applyMicPga()` and `applySpeaker()` run after every init to restore the configured preamp (`mic_pga`, 0-30 dB) and keep the amplifier off (`speaker`)
-
-### The radio's transmit bursts reach the mic
-- On the Echo Base a 9.6-16 kHz noise band rises about 10 dB during every WiFi transmit burst. Transmit power, the preamp setting and the speaker amplifier do not change it: it enters at the mic itself
-- The 8th-order low-pass (`lp_enable`, `lp_cutoff`, default 8 kHz, off by default) is the remedy; it costs the top of the highest bird song (goldcrest, firecrest)
 - Hardware: M5Stack Atom + Atomic Echo Base (A149); pins: I2C SDA=25, SCL=21; I2S BCLK=33, LRCLK=19, DIN=23
 
 ### Socket Ownership Model
@@ -53,8 +49,7 @@ See `README.md` for project documentation, features, architecture, and usage.
 2. Check free heap (should stay above ~80KB)
 3. Look for "Write timeout" messages (client too slow)
 4. Read the `[HB]` serial line (every 30 s): free heap, largest free block, WiFi state and the time since the
-   last packet. Known: the firmware can drop off the network after minutes of streaming while it keeps running
-   and WiFi reports connected; the heartbeat records what precedes it.
+   last packet.
 
 ## Build & Deploy
 ```bash
@@ -62,7 +57,7 @@ pio run                      # Build
 pio run --target upload      # Upload over USB
 pio device monitor -b 115200 # Monitor
 ```
-USB is the update path. The build gets the espota listener (ArduinoOTA, `m5stack-atom-ota` env, `OTA_HOST`,
+The build gets the espota listener (ArduinoOTA, `m5stack-atom-ota` env, `OTA_HOST`,
 `OTA_HOST_PORT`) only when `OTA_PASSWORD` is set at build time (`ota_password.py` bakes in its MD5). The
 Atom's USB serial fails at 460800 baud; 1.5 Mbaud (the board's `upload_speed`) works.
 
