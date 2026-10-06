@@ -56,6 +56,12 @@ const char* FW_VERSION_STR = FW_VERSION;
 // bitterns, and other low-calling species. Raise only for strong wind/traffic noise.
 #define DEFAULT_HPF_ENABLED true
 #define DEFAULT_HPF_CUTOFF_HZ 80
+// ES8311 analog mic preamp (PGA), 0-30 dB in 3 dB steps; the library's init sets the maximum.
+#define DEFAULT_MIC_PGA_DB 30
+// Low-pass filter (8th-order Butterworth): off by default. On this board the mic picks up a
+// 9.6-16 kHz noise band gated by the radio's transmit bursts; the filter is the way to remove it.
+#define DEFAULT_LPF_ENABLED false
+#define DEFAULT_LPF_CUTOFF_HZ 8000
 
 // Thermal protection defaults
 #define DEFAULT_OVERHEAT_PROTECTION true
@@ -102,6 +108,8 @@ bool rtspServerEnabled = true;
 uint32_t currentSampleRate = DEFAULT_SAMPLE_RATE;
 float currentGainFactor = DEFAULT_GAIN_FACTOR;
 uint16_t currentBufferSize = DEFAULT_BUFFER_SIZE;
+uint8_t micPgaDb = DEFAULT_MIC_PGA_DB;    // ES8311 analog preamp gain, dB (0-30, step 3)
+bool speakerEnabled = false;              // Echo Base speaker amplifier; a mic has no use for it
 // The ES8311 codec on the Atomic Echo Base sends 32-bit slots; the capture loop
 // scales them to 16-bit range itself — no bit shifting is needed.
 uint8_t i2sShiftBits = 0;  // Fixed at 0 for ES8311 codec on Atomic Echo Base
@@ -139,6 +147,11 @@ struct Biquad {
 };
 bool highpassEnabled = DEFAULT_HPF_ENABLED;
 uint16_t highpassCutoffHz = DEFAULT_HPF_CUTOFF_HZ;
+// -- Low-pass filter: four cascaded biquads (8th-order Butterworth)
+bool lowpassEnabled = DEFAULT_LPF_ENABLED;
+uint16_t lowpassCutoffHz = DEFAULT_LPF_CUTOFF_HZ;
+Biquad lpf[4];
+volatile uint32_t lpfConfigVersion = 0;   // bumped by updateLowpassCoeffs(); Core 1 re-copies on change
 Biquad hpf;
 uint32_t hpfConfigSampleRate = 0;
 uint16_t hpfConfigCutoff = 0;
@@ -289,6 +302,32 @@ void updateHighpassCoeffs() {
 
     hpfConfigSampleRate = currentSampleRate;
     hpfConfigCutoff = (uint16_t)fc;
+}
+
+// 8th-order Butterworth low-pass as four biquad sections; section Q from the pole angles
+// (1 / (2 cos((2k+1)pi/16)), k = 0..3). Steep enough that an 8 kHz cutoff takes the 9.6-16 kHz
+// band down 6 dB at its lower edge and 40 dB or more from 11 kHz up.
+void updateLowpassCoeffs() {
+    float fs = (float)currentSampleRate;
+    float fc = (float)lowpassCutoffHz;
+    if (fc < 1000.0f) fc = 1000.0f;
+    if (fc > fs * 0.45f) fc = fs * 0.45f;
+    const float pi = 3.14159265358979323846f;
+    float w0 = 2.0f * pi * (fc / fs);
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    for (int k = 0; k < 4; k++) {
+        float Q = 1.0f / (2.0f * cosf((2.0f * k + 1.0f) * pi / 16.0f));
+        float alpha = sinw0 / (2.0f * Q);
+        float a0 = 1.0f + alpha;
+        lpf[k].b0 = ((1.0f - cosw0) * 0.5f) / a0;
+        lpf[k].b1 = (1.0f - cosw0) / a0;
+        lpf[k].b2 = ((1.0f - cosw0) * 0.5f) / a0;
+        lpf[k].a1 = (-2.0f * cosw0) / a0;
+        lpf[k].a2 = (1.0f - alpha) / a0;
+        lpf[k].reset();
+    }
+    lpfConfigVersion++;
 }
 
 // Uptime -> "Xd Yh Zm Ts"
@@ -496,6 +535,12 @@ void loadAudioSettings() {
     wifiTxPowerDbm = audioPrefs.getFloat("wifiTxDbm", DEFAULT_WIFI_TX_DBM);
     highpassEnabled = audioPrefs.getBool("hpEnable", DEFAULT_HPF_ENABLED);
     highpassCutoffHz = (uint16_t)audioPrefs.getUInt("hpCutoff", DEFAULT_HPF_CUTOFF_HZ);
+    micPgaDb = audioPrefs.getUChar("micPgaDb", DEFAULT_MIC_PGA_DB);
+    if (micPgaDb > 30) micPgaDb = 30;
+    micPgaDb -= micPgaDb % 3;
+    speakerEnabled = audioPrefs.getBool("spkEnable", false);
+    lowpassEnabled = audioPrefs.getBool("lpEnable", DEFAULT_LPF_ENABLED);
+    lowpassCutoffHz = (uint16_t)audioPrefs.getUInt("lpCutoff", DEFAULT_LPF_CUTOFF_HZ);
     agcEnabled = audioPrefs.getBool("agcEnable", false);
     ledMode = audioPrefs.getUChar("ledMode", 1);
     if (ledMode > 2) ledMode = 1;
@@ -546,6 +591,10 @@ void saveAudioSettings() {
     audioPrefs.putFloat("wifiTxDbm", wifiTxPowerDbm);
     audioPrefs.putBool("hpEnable", highpassEnabled);
     audioPrefs.putUInt("hpCutoff", (uint32_t)highpassCutoffHz);
+    audioPrefs.putUChar("micPgaDb", micPgaDb);
+    audioPrefs.putBool("spkEnable", speakerEnabled);
+    audioPrefs.putBool("lpEnable", lowpassEnabled);
+    audioPrefs.putUInt("lpCutoff", (uint32_t)lowpassCutoffHz);
     audioPrefs.putBool("agcEnable", agcEnabled);
     audioPrefs.putUChar("ledMode", ledMode);
     audioPrefs.putBool("ohEnable", overheatProtectionEnabled);
@@ -603,6 +652,10 @@ void resetToDefaultSettings() {
     wifiTxPowerDbm = DEFAULT_WIFI_TX_DBM;
     highpassEnabled = DEFAULT_HPF_ENABLED;
     highpassCutoffHz = DEFAULT_HPF_CUTOFF_HZ;
+    micPgaDb = DEFAULT_MIC_PGA_DB;
+    speakerEnabled = false;
+    lowpassEnabled = DEFAULT_LPF_ENABLED;
+    lowpassCutoffHz = DEFAULT_LPF_CUTOFF_HZ;
     agcEnabled = false;
     agcMultiplier = 1.0f;
     ledMode = 1;
@@ -643,6 +696,7 @@ void restartI2S() {
 
     // Refresh HPF with current parameters
     updateHighpassCoeffs();
+    updateLowpassCoeffs();
     maxPacketRate = 0;
     minPacketRate = 0xFFFFFFFF;
 
@@ -733,6 +787,8 @@ void audioCaptureTask(void* parameter) {
     Biquad localHpf = hpf;
     uint32_t localHpfConfigSampleRate = hpfConfigSampleRate;
     uint16_t localHpfConfigCutoff = hpfConfigCutoff;
+    Biquad localLpf[4] = { lpf[0], lpf[1], lpf[2], lpf[3] };
+    uint32_t localLpfVersion = lpfConfigVersion;
 
     // AGC state (local)
     float localAgcMult = 1.0f;
@@ -802,6 +858,10 @@ void audioCaptureTask(void* parameter) {
             localHpfConfigSampleRate = currentSampleRate;
             localHpfConfigCutoff = highpassCutoffHz;
         }
+        if (localLpfVersion != lpfConfigVersion) {
+            for (int k = 0; k < 4; k++) localLpf[k] = lpf[k];
+            localLpfVersion = lpfConfigVersion;
+        }
 
         // Determine effective gain (manual * AGC if enabled)
         float effectiveGain = currentGainFactor;
@@ -820,6 +880,12 @@ void audioCaptureTask(void* parameter) {
 
             if (highpassEnabled) {
                 sample = localHpf.process(sample);
+            }
+            if (lowpassEnabled) {
+                sample = localLpf[0].process(sample);
+                sample = localLpf[1].process(sample);
+                sample = localLpf[2].process(sample);
+                sample = localLpf[3].process(sample);
             }
 
             float amplified = sample * effectiveGain;
@@ -1067,6 +1133,18 @@ bool requestStreamStop(const char* reason) {
     }
 }
 
+// ES8311 analog preamp: SYSTEM_REG14 = analog mic enable (bit 4) | PGA step (0-10, 3 dB each).
+// echoBase.init() resets it to the maximum, so this runs after every init.
+void applyMicPga() {
+    echoBase.setMicPGAGain(false, (uint8_t)(0x10 | (micPgaDb / 3)));
+}
+
+// The Echo Base's class-D speaker amplifier sits next to the mic; echoBase.init() switches it on,
+// so this runs after every init. Off unless asked for: its switching is a noise source for the mic.
+void applySpeaker() {
+    echoBase.setMute(!speakerEnabled);
+}
+
 // I2S and ES8311 codec setup for M5Stack Atom + Atomic Echo Base
 void setup_i2s_driver() {
     // Initialize the ES8311 codec via I2C using the M5EchoBase library.
@@ -1080,6 +1158,8 @@ void setup_i2s_driver() {
                   I2S_DATA_IN_PIN, I2S_LRCLK_PIN,
                   I2S_DATA_OUT_PIN, I2S_BCLK_PIN,
                   Wire);
+    applyMicPga();
+    applySpeaker();
 
     i2s_driver_uninstall(I2S_NUM_0);
 
@@ -1481,6 +1561,7 @@ void setup() {
 
     Serial.println("Updating highpass coefficients...");
     updateHighpassCoeffs();
+    updateLowpassCoeffs();
     Serial.println("Highpass coefficients updated");
 
     if (!overheatLatched) {
