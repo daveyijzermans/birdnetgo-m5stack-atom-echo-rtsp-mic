@@ -13,7 +13,7 @@
 // ================== DUAL-CORE AUDIO ARCHITECTURE ==================
 // Core 1: Complete audio pipeline (I2S → process → RTP → WiFi)
 // Core 0: Web UI, diagnostics, RTSP protocol, client management
-// ES8311 codec outputs signed 16-bit PCM via standard I2S
+// ES8311 codec outputs 32-bit I2S slots; the pipeline scales them to 16-bit PCM
 
 // Pointer handoff: Core 0 sets on PLAY, Core 1 uses for streaming, clears on failure
 WiFiClient* volatile streamClient = NULL;
@@ -101,8 +101,8 @@ bool rtspServerEnabled = true;
 uint32_t currentSampleRate = DEFAULT_SAMPLE_RATE;
 float currentGainFactor = DEFAULT_GAIN_FACTOR;
 uint16_t currentBufferSize = DEFAULT_BUFFER_SIZE;
-// The ES8311 codec on the Atomic Echo Base outputs standard signed 16-bit PCM
-// via I2S — no bit shifting is needed.
+// The ES8311 codec on the Atomic Echo Base sends 32-bit slots; the capture loop
+// scales them to 16-bit range itself — no bit shifting is needed.
 uint8_t i2sShiftBits = 0;  // Fixed at 0 for ES8311 codec on Atomic Echo Base
 String currentHostname = DEFAULT_HOSTNAME;  // mDNS/WiFi hostname (persisted, UI-configurable)
 
@@ -716,7 +716,7 @@ void audioCaptureTask(void* parameter) {
     const uint32_t MAX_ERRORS = 10;
     uint32_t packetCount = 0;
 
-    int16_t* captureBuffer = (int16_t*)malloc(currentBufferSize * sizeof(int16_t));
+    int32_t* captureBuffer = (int32_t*)malloc(currentBufferSize * sizeof(int32_t));
     int16_t* outputBuffer = (int16_t*)malloc(currentBufferSize * sizeof(int16_t));
 
     if (!captureBuffer || !outputBuffer) {
@@ -775,7 +775,7 @@ void audioCaptureTask(void* parameter) {
 
         // Read from I2S with 100ms timeout (allows clean task exit)
         esp_err_t result = i2s_read(I2S_NUM_0, captureBuffer,
-                                    currentBufferSize * sizeof(int16_t),
+                                    currentBufferSize * sizeof(int32_t),
                                     &bytesRead, pdMS_TO_TICKS(100));
 
         if (result != ESP_OK || bytesRead == 0) {
@@ -792,7 +792,7 @@ void audioCaptureTask(void* parameter) {
         }
 
         consecutiveErrors = 0;
-        uint16_t samplesRead = bytesRead / sizeof(int16_t);
+        uint16_t samplesRead = bytesRead / sizeof(int32_t);
 
         // Update HPF coefficients if changed
         if (highpassEnabled && (localHpfConfigSampleRate != currentSampleRate ||
@@ -814,7 +814,8 @@ void audioCaptureTask(void* parameter) {
         float sumSquares = 0.0f;
 
         for (int i = 0; i < samplesRead; i++) {
-            float sample = (float)(captureBuffer[i] >> i2sShiftBits);
+            // 32-bit slot scaled to 16-bit range; the codec's extra bits stay as fraction
+            float sample = (float)(captureBuffer[i] >> i2sShiftBits) * (1.0f / 65536.0f);
 
             if (highpassEnabled) {
                 sample = localHpf.process(sample);
@@ -1070,6 +1071,9 @@ void setup_i2s_driver() {
     // Initialize the ES8311 codec via I2C using the M5EchoBase library.
     // This also installs a temporary I2S driver internally; we uninstall it
     // immediately after so we can replace it with our own custom configuration.
+    // M5EchoBase sets the codec up for 32-bit slots with its MCLK taken from BCLK
+    // (64 x fs), so the driver below must clock 32-bit slots too: with 16-bit slots
+    // BCLK is 32 x fs, the ADC runs at half the frame rate and every sample repeats.
     echoBase.init(currentSampleRate,
                   I2C_SDA_PIN, I2C_SCL_PIN,
                   I2S_DATA_IN_PIN, I2S_LRCLK_PIN,
@@ -1078,16 +1082,16 @@ void setup_i2s_driver() {
 
     i2s_driver_uninstall(I2S_NUM_0);
 
-    // Scale DMA buffer to ~3.75 ms per interrupt regardless of sample rate.
-    // Formula: round(rate × 0.00375), hardware max = 1024. Examples: 16k→60, 32k→120, 48k→180.
-    uint16_t dma_buf_len = (uint16_t)min(1024UL,
-        (unsigned long)((currentSampleRate * 375UL + 50000UL) / 100000UL));
+    // ~10 ms per DMA buffer (4 bytes per frame, at most 1023 frames per buffer) and
+    // 20 buffers: 200 ms of audio covers a TCP write stalled on ACKs without dropping samples.
+    uint16_t dma_buf_len = (uint16_t)min(1023UL,
+        (unsigned long)((currentSampleRate + 50UL) / 100UL));
 
     i2s_config_t i2s_config = {
-        // Standard I2S mode — ES8311 codec outputs signed 16-bit PCM (not PDM)
+        // Standard I2S mode, 32-bit slots to match the ES8311 clock setup (not PDM)
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = currentSampleRate,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT,
 #if ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(4, 1, 0)
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
@@ -1095,7 +1099,7 @@ void setup_i2s_driver() {
         .communication_format = I2S_COMM_FORMAT_I2S,
 #endif
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
+        .dma_buf_count = 20,
         .dma_buf_len = dma_buf_len,
         .use_apll = false,
         .tx_desc_auto_clear = false,
@@ -1114,7 +1118,7 @@ void setup_i2s_driver() {
 
     i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_NUM_0, &pin_config);
-    i2s_set_clk(I2S_NUM_0, currentSampleRate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+    i2s_set_clk(I2S_NUM_0, currentSampleRate, I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_MONO);
 
     simplePrintln("I2S ready (ES8311 codec): " + String(currentSampleRate) + "Hz, gain " +
                   String(currentGainFactor, 1) + ", buffer " + String(currentBufferSize) +
