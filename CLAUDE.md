@@ -52,6 +52,9 @@ See `README.md` for project documentation, features, architecture, and usage.
 1. Check WiFi RSSI (should be > -70 dBm)
 2. Check free heap (should stay above ~80KB)
 3. Look for "Write timeout" messages (client too slow)
+4. Read the `[HB]` serial line (every 30 s): free heap, largest free block, WiFi state and the time since the
+   last packet. Known: the firmware can drop off the network after minutes of streaming while it keeps running
+   and WiFi reports connected; the heartbeat records what precedes it.
 
 ## Build & Deploy
 ```bash
@@ -60,10 +63,8 @@ pio run --target upload      # Upload over USB
 pio device monitor -b 115200 # Monitor
 ```
 USB is the update path. The build gets the espota listener (ArduinoOTA, `m5stack-atom-ota` env, `OTA_HOST`,
-`OTA_HOST_PORT`) only when `OTA_PASSWORD` is set at build time (`ota_password.py` bakes in its MD5). Leave it
-unset: the one build that carried the listener hung after 16 minutes of streaming (no serial output, radio
-still associated, no reboot), and the same code without it runs clean. The Atom's USB serial fails at
-460800 baud; 1.5 Mbaud (the board's `upload_speed`) works.
+`OTA_HOST_PORT`) only when `OTA_PASSWORD` is set at build time (`ota_password.py` bakes in its MD5). The
+Atom's USB serial fails at 460800 baud; 1.5 Mbaud (the board's `upload_speed`) works.
 
 ## Configuration Storage
 Settings saved to flash in `audioPrefs` namespace via ESP32 Preferences library.

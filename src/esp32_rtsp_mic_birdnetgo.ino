@@ -2,6 +2,7 @@
 #include <WiFiManager.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+#include <esp_heap_caps.h>
 #include "driver/i2s.h"
 #include <Preferences.h>
 #include <math.h>
@@ -101,6 +102,7 @@ int rtspParseBufferPos = 0;
 // -- Global state
 unsigned long audioPacketsSent = 0;
 unsigned long audioPacketsDropped = 0;  // Track dropped frames
+volatile unsigned long lastPacketSentMs = 0;  // millis() of the last RTP packet written (heartbeat)
 unsigned long lastStatsReset = 0;
 bool rtspServerEnabled = true;
 
@@ -1150,14 +1152,23 @@ void setup_i2s_driver() {
     // Initialize the ES8311 codec via I2C using the M5EchoBase library.
     // This also installs a temporary I2S driver internally; we uninstall it
     // immediately after so we can replace it with our own custom configuration.
+    // On a restart our own driver is still installed: remove it first, or the library's
+    // install fails and echoBase.init() returns before it configures the codec.
+    static bool i2sInstalled = false;
+    if (i2sInstalled) {
+        i2s_driver_uninstall(I2S_NUM_0);
+        i2sInstalled = false;
+    }
     // M5EchoBase sets the codec up for 32-bit slots with its MCLK taken from BCLK
     // (64 x fs), so the driver below must clock 32-bit slots too: with 16-bit slots
     // BCLK is 32 x fs, the ADC runs at half the frame rate and every sample repeats.
-    echoBase.init(currentSampleRate,
-                  I2C_SDA_PIN, I2C_SCL_PIN,
-                  I2S_DATA_IN_PIN, I2S_LRCLK_PIN,
-                  I2S_DATA_OUT_PIN, I2S_BCLK_PIN,
-                  Wire);
+    if (!echoBase.init(currentSampleRate,
+                       I2C_SDA_PIN, I2C_SCL_PIN,
+                       I2S_DATA_IN_PIN, I2S_LRCLK_PIN,
+                       I2S_DATA_OUT_PIN, I2S_BCLK_PIN,
+                       Wire)) {
+        simplePrintln("ES8311 codec init failed");
+    }
     applyMicPga();
     applySpeaker();
 
@@ -1197,7 +1208,7 @@ void setup_i2s_driver() {
         .data_in_num = I2S_DATA_IN_PIN
     };
 
-    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    i2sInstalled = (i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL) == ESP_OK);
     i2s_set_pin(I2S_NUM_0, &pin_config);
     i2s_set_clk(I2S_NUM_0, currentSampleRate, I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_MONO);
 
@@ -1282,6 +1293,7 @@ void sendRTPPacket(WiFiClient &client, int16_t* audioData, int numSamples) {
         rtpSequence++;
         rtpTimestamp += (uint32_t)numSamples;
         audioPacketsSent++;
+        lastPacketSentMs = millis();
         consecutiveWriteFailures = 0;  // Reset on success
     } else {
         audioPacketsDropped++;
@@ -1641,6 +1653,21 @@ void loop() {
         if (currentHeap < minFreeHeap) minFreeHeap = currentHeap;
         Serial.printf("[Heap] Current: %u KB, Min: %u KB\n", currentHeap / 1024, minFreeHeap / 1024);
         lastMemoryCheck = millis();
+    }
+
+    // Serial heartbeat every 30 s: heap, WiFi and stream state, so a network stall leaves a record.
+    // Reads only flags and counters; the stream socket belongs to Core 1 and is not touched here.
+    static unsigned long lastHeartbeat = 0;
+    if (millis() - lastHeartbeat > 30000) {
+        lastHeartbeat = millis();
+        unsigned long sentAt = lastPacketSentMs;
+        Serial.printf("[HB] up=%lus heap=%u min=%u blk=%u dma=%u wifi=%d rssi=%d ch=%d "
+                      "stream=%d client=%d sent=%lu drop=%lu since_send=%lums\n",
+                      millis() / 1000, ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                      (int)WiFi.status(), (int)WiFi.RSSI(), (int)WiFi.channel(),
+                      (int)isStreaming, (int)(streamClient != NULL), audioPacketsSent, audioPacketsDropped,
+                      sentAt ? millis() - sentAt : 0UL);
     }
 
     if (millis() - lastPerformanceCheck > (performanceCheckInterval * 60000UL)) {
