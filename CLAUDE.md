@@ -57,10 +57,13 @@ See `README.md` for project documentation, features, architecture, and usage.
 ```bash
 pio run                      # Build
 pio run --target upload      # Upload over USB
-pio run -e m5stack-atom-ota --target upload  # Upload over WiFi (espota)
 pio device monitor -b 115200 # Monitor
 ```
-A build carries network updates only when `OTA_PASSWORD` is set (`ota_password.py` bakes in its MD5); the OTA env also takes `OTA_HOST` and `OTA_HOST_PORT`.
+USB is the update path. The build gets the espota listener (ArduinoOTA, `m5stack-atom-ota` env, `OTA_HOST`,
+`OTA_HOST_PORT`) only when `OTA_PASSWORD` is set at build time (`ota_password.py` bakes in its MD5). Leave it
+unset: the one build that carried the listener hung after 16 minutes of streaming (no serial output, radio
+still associated, no reboot), and the same code without it runs clean. The Atom's USB serial fails at
+460800 baud; 1.5 Mbaud (the board's `upload_speed`) works.
 
 ## Configuration Storage
 Settings saved to flash in `audioPrefs` namespace via ESP32 Preferences library.
