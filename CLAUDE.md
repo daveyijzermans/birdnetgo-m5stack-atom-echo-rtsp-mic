@@ -51,9 +51,11 @@ See `README.md` for project documentation, features, architecture, and usage.
 ## Build & Deploy
 ```bash
 pio run                      # Build
-pio run --target upload      # Upload
+pio run --target upload      # Upload over USB
+pio run -e m5stack-atom-ota --target upload  # Upload over WiFi (espota)
 pio device monitor -b 115200 # Monitor
 ```
+A build carries network updates only when `OTA_PASSWORD` is set (`ota_password.py` bakes in its MD5); the OTA env also takes `OTA_HOST` and `OTA_HOST_PORT`.
 
 ## Configuration Storage
 Settings saved to flash in `audioPrefs` namespace via ESP32 Preferences library.

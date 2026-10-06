@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <ESPmDNS.h>
+#include <ArduinoOTA.h>
 #include "driver/i2s.h"
 #include <Preferences.h>
 #include <math.h>
@@ -37,7 +38,7 @@ SemaphoreHandle_t taskExitSemaphore = NULL;  // confirmed task exit
 volatile bool core1OwnsLED = false;          // LED ownership flag
 
 // ================== SETTINGS (ESP32 RTSP Mic for BirdNET-Go) ==================
-#define FW_VERSION "2.4.0"
+#define FW_VERSION "2.4.1"
 // Expose FW version as a global C string for WebUI/API
 const char* FW_VERSION_STR = FW_VERSION;
 
@@ -1376,6 +1377,24 @@ void processRTSP(WiFiClient &client) {
 
 // Web UI is a separate module (WebUI.*)
 
+#ifdef OTA_PASSWORD_HASH
+// Network firmware updates (espota, port 3232); the build carries only the password's MD5 (see
+// ota_password.py). An update stops the audio pipeline first so Core 1 and the radio are free, and
+// the device reboots into the new image when it completes.
+void setupOta() {
+    ArduinoOTA.setMdnsEnabled(false);  // applyHostname() already runs the mDNS responder
+    ArduinoOTA.setPasswordHash(OTA_PASSWORD_HASH);
+    ArduinoOTA.onStart([]() {
+        simplePrintln("OTA update started");
+        if (isStreaming) requestStreamStop("OTA update");
+        stopAudioCaptureTask();
+    });
+    ArduinoOTA.onEnd([]() { simplePrintln("OTA update written, rebooting"); });
+    ArduinoOTA.onError([](ota_error_t e) { simplePrintln("OTA update failed: error " + String((int)e)); });
+    ArduinoOTA.begin();
+}
+#endif
+
 void setup() {
     // Initialize M5Atom (for button and LED, serial enabled)
     M5.begin(true, false, true);
@@ -1474,6 +1493,9 @@ void setup() {
     }
     // Web UI
     webui_begin();
+#ifdef OTA_PASSWORD_HASH
+    setupOta();
+#endif
 
     lastStatsReset = millis();
     lastRTSPActivity = millis();
@@ -1523,6 +1545,9 @@ void loop() {
     M5.update();
 
     webui_handleClient();
+#ifdef OTA_PASSWORD_HASH
+    ArduinoOTA.handle();
+#endif
 
     if (millis() - lastTempCheck > 60000) { // 1 min
         checkTemperature();
