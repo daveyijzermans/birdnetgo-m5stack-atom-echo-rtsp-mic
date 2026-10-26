@@ -58,7 +58,8 @@ pio run --target upload      # Upload over USB
 pio device monitor -b 115200 # Monitor
 ```
 The build gets the espota listener (ArduinoOTA, `m5stack-atom-ota` env, `OTA_HOST`,
-`OTA_HOST_PORT`) only when `OTA_PASSWORD` is set at build time (`ota_password.py` bakes in its MD5). The
+`OTA_HOST_PORT`) only when `OTA_PASSWORD` is set at build time (`build_secrets.py` bakes in its MD5), and the
+MQTT client (`Mqtt.cpp`) only when `MQTT_HOST` is set, with `MQTT_USERNAME`/`MQTT_PASSWORD`. The
 Atom's USB serial fails at 460800 baud; 1.5 Mbaud (the board's `upload_speed`) works.
 
 ## Configuration Storage

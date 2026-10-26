@@ -71,13 +71,14 @@ pio run --target upload      # Flash
 pio device monitor -b 115200 # Serial monitor
 ```
 
-### Dependencies
-```ini
-lib_deps =
-    tzapu/WiFiManager @ ^2.0.17
-    m5stack/M5Atom @ ^0.1.3
-    fastled/FastLED @ ^3.10.3
-```
+The build takes its secrets from the environment (`build_secrets.py`): `OTA_PASSWORD` builds network updates in,
+`MQTT_HOST` (with `MQTT_PORT`, `MQTT_USERNAME`, `MQTT_PASSWORD`) the MQTT client.
+
+## MQTT
+
+Under the hostname: `<host>/status` is `online`/`offline` (retained, the last will); `<host>/thermal` holds the
+`/api/thermal` JSON (retained, at once when the latch, lockout or sensor fault changes, else every minute); any message
+on `<host>/thermal/clear` clears a persisted latch, as the web UI's button does.
 
 ## Documentation
 

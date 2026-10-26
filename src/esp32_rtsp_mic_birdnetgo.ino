@@ -10,6 +10,7 @@
 #include <M5Atom.h>
 #include "M5EchoBase.h"
 #include "WebUI.h"
+#include "Mqtt.h"
 #include "arduinoFFT.h"
 
 // ================== DUAL-CORE AUDIO ARCHITECTURE ==================
@@ -1586,6 +1587,7 @@ void setup() {
     }
     // Web UI
     webui_begin();
+    mqtt_begin();
 #ifdef OTA_PASSWORD_HASH
     setupOta();
 #endif
@@ -1638,6 +1640,7 @@ void loop() {
     M5.update();
 
     webui_handleClient();
+    mqtt_loop();
 #ifdef OTA_PASSWORD_HASH
     ArduinoOTA.handle();
 #endif

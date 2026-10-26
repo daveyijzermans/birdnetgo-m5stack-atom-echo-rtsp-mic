@@ -410,7 +410,8 @@ static void httpPerfStatus() {
     apiSendJSON(json);
 }
 
-static void httpThermal() {
+// The thermal state as JSON: /api/thermal and the MQTT thermal topic say the same.
+String thermalJson() {
     String since = "";
     if (overheatTripTemp > 0.0f && overheatTriggeredAt != 0) {
         since = formatSince(overheatTriggeredAt);
@@ -436,10 +437,16 @@ static void httpThermal() {
     json += "\"last_trip_since\":\"" + jsonEscape(since) + "\",";
     json += "\"manual_restart\":" + String(manualRequired?"true":"false");
     json += "}";
-    apiSendJSON(json);
+    return json;
 }
 
-static void httpThermalClear() {
+static void httpThermal() {
+    apiSendJSON(thermalJson());
+}
+
+// Clear a persisted thermal latch and bring the RTSP server back; false when nothing was latched.
+// The web UI and the MQTT clear topic both come here; source names the caller in the log.
+bool clearThermalLatch(const char* source) {
     if (overheatLatched) {
         overheatLatched = false;
         overheatLockoutActive = false;
@@ -453,11 +460,14 @@ static void httpThermalClear() {
             rtspServerEnabled = true;
         }
         saveAudioSettings();
-        webui_pushLog(F("UI action: thermal_latch_clear"));
-        apiSendJSON(F("{\"ok\":true}"));
-    } else {
-        apiSendJSON(F("{\"ok\":false}"));
+        webui_pushLog(String(source) + " action: thermal_latch_clear");
+        return true;
     }
+    return false;
+}
+
+static void httpThermalClear() {
+    apiSendJSON(clearThermalLatch("UI") ? F("{\"ok\":true}") : F("{\"ok\":false}"));
 }
 
 static void httpLogs() {

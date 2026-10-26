@@ -10,3 +10,7 @@ void webui_pushLog(const String &line);
 
 // Request Core 1 to stop streaming (defined in main .ino)
 bool requestStreamStop(const char* reason);
+
+// The thermal state as JSON (/api/thermal and MQTT), and clearing a persisted latch (web UI and MQTT)
+String thermalJson();
+bool clearThermalLatch(const char* source);
