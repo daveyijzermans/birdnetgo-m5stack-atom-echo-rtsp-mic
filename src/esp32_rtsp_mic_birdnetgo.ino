@@ -40,7 +40,7 @@ SemaphoreHandle_t taskExitSemaphore = NULL;  // confirmed task exit
 volatile bool core1OwnsLED = false;          // LED ownership flag
 
 // ================== SETTINGS (ESP32 RTSP Mic for BirdNET-Go) ==================
-#define FW_VERSION "2.4.1"
+#define FW_VERSION "2.5.0"
 // Expose FW version as a global C string for WebUI/API
 const char* FW_VERSION_STR = FW_VERSION;
 
